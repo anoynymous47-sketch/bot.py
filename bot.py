@@ -1,94 +1,114 @@
-import requests, glob, asyncio, urllib.parse
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+import os
+import logging
+import asyncio
+from aiohttp import web
+import requests
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-BOT_TOKEN = "8966040622:AAEFlHB3i84oSxQaeXBoB6bpTJTQCfbGDPQ"
+# --- CONFIGURATION ---
+# Using the test token from your screenshot
+BOT_TOKEN = "8966040622:AAEFlHB3i84oSxQaeXBoB6bpTJTQCfbGDPQ" 
+PORT = int(os.environ.get("PORT", 8080))
+# Render will provide this URL. You will set this in the Render dashboard.
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://your-app-name.onrender.com")
 
-def search_music(q):
-    try:
-        r = requests.get("https://itunes.apple.com/search", params={"term": q, "media": "music", "limit": 7}, timeout=10)
-        if r.ok and r.json().get("results"): 
-            return r.json()["results"]
-    except: pass
-    try:
-        r = requests.get("https://api.deezer.com/search", params={"q": q}, timeout=10)
-        if r.ok and r.json().get("data"):
-            return [{"artistName": d["artist"]["name"], "trackName": d["title"]} for d in r.json()["data"][:7]]
-    except: pass
-    return []
+# Enable logging
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-def get_lyrics(artist, track):
-    try:
-        r = requests.get("https://lrclib.net/api/get", params={"artist_name": artist, "track_name": track}, timeout=10)
-        if r.ok and r.json().get("plainLyrics"):
-            return {"src": "lrclib.net", "plain": r.json().get("plainLyrics"), "synced": r.json().get("syncedLyrics")}
-    except: pass
-    try:
-        r = requests.get("https://lrclib.net/api/search", params={"q": f"{artist} {track}"}, timeout=10)
-        if r.ok and r.json() and r.json()[0].get("plainLyrics"):
-            j = r.json()[0]
-            return {"src": "lrclib.net", "plain": j.get("plainLyrics"), "synced": j.get("syncedLyrics")}
-    except: pass
-    try:
-        url = f"https://api.lyrics.ovh/v1/{urllib.parse.quote(artist)}/{urllib.parse.quote(track)}"
-        r = requests.get(url, timeout=10)
-        if r.ok and r.json().get("lyrics"):
-            return {"src": "lyrics.ovh", "plain": r.json()["lyrics"], "synced": None}
-    except: pass
-    return None
+# --- BOT HANDLERS ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🎵 Welcome to the Lyrics & Song Bot!\n\n"
+        "Use `/lyrics Artist - Song Name` to find lyrics.\n"
+        "Or just type a song name to search for it!"
+    )
 
-def download_audio(artist, track):
-    import yt_dlp, os
-    for f in glob.glob("/tmp/song.*"):
-        try: os.remove(f)
-        except: pass
-    opts = {'format':'bestaudio[ext=m4a]/bestaudio','outtmpl':'/tmp/song.%(ext)s','noplaylist':True,'quiet':True}
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.extract_info(f"ytsearch1:{artist} {track} audio", download=True)
-        files = glob.glob("/tmp/song.*")
-        return files[0] if files else None
-    except: return None
-
-async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("v12 RENDER NO PROXY ✅\nSend: bahagia lagi")
-
-async def search_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.message.text.strip()
-    if len(q) < 2: return
-    results = await asyncio.to_thread(search_music, q)
-    if not results:
-        await update.message.reply_text("No results")
+async def get_lyrics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = " ".join(context.args)
+    if not text:
+        await update.message.reply_text("❌ Please use the format: `/lyrics Artist - Song Name`")
         return
-    buttons = []; msg = f"Found {len(results)}:\n"
-    for r in results:
-        artist = r.get("artistName","").strip(); track = r.get("trackName","").strip()
-        msg += f"• {artist} - {track}\n"
-        buttons.append([InlineKeyboardButton(f"▶️ {artist} - {track}"[:60], callback_data=f"{artist[:20]}@@{track[:20]}")])
-    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(buttons))
+    
+    await update.message.reply_text(f"🔎 Searching lyrics for: {text}...")
+    
+    try:
+        # Split by "-" to separate artist and title if provided
+        if " - " in text:
+            artist, title = text.split(" - ", 1)
+        else:
+            # If no hyphen, just search by title
+            artist, title = "", text
 
-async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    print(f"TAPPED {q.data}")
-    await q.answer(text="Loading...")
-    artist, track = q.data.split("@@")
-    await q.edit_message_text(f"⏳ Loading {artist.strip()} - {track.strip()}...")
-    lrc = await asyncio.to_thread(get_lyrics, artist.strip(), track.strip())
-    if lrc:
-        await ctx.bot.send_message(chat_id=q.message.chat_id, text=f"✅ From {lrc['src']}:\n\n{lrc['plain'][:4000]}")
-        if lrc.get("synced"):
-            path = f"/tmp/{track}.lrc"
-            open(path,"w",encoding="utf-8").write(lrc["synced"])
-            await ctx.bot.send_document(chat_id=q.message.chat_id, document=open(path,"rb"), caption=f"LRC {lrc['src']}")
-    else:
-        await ctx.bot.send_message(chat_id=q.message.chat_id, text="❌ Lyrics not found on both servers")
-    apath = await asyncio.to_thread(download_audio, artist.strip(), track.strip())
-    if apath:
-        await ctx.bot.send_audio(chat_id=q.message.chat_id, audio=open(apath,"rb"), title=track, performer=artist)
+        # Fetch lyrics from a free API (using asyncio.to_thread to prevent blocking)
+        def fetch_lyrics():
+            url = f"https://api.lyrics.ovh/v1/{artist}/{title}" if artist else f"https://api.lyrics.ovh/v1/Unknown/{title}"
+            response = requests.get(url)
+            if response.status_code == 200:
+                return response.json().get("lyrics", "Lyrics not found.")
+            return "Lyrics not found."
 
-app = ApplicationBuilder().token(BOT_TOKEN).build()
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CallbackQueryHandler(button_handler))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_handler))
-print("v12 RENDER - NO PROXY")
-app.run_polling()
+        lyrics = await asyncio.to_thread(fetch_lyrics)
+        
+        # Telegram has a 4096 character limit, so we truncate if needed
+        if len(lyrics) > 4000:
+            lyrics = lyrics[:4000] + "\n\n... (truncated)"
+            
+        await update.message.reply_text(lyrics)
+    except Exception as e:
+        logger.error(f"Error fetching lyrics: {e}")
+        await update.message.reply_text("❌ Sorry, I couldn't find the lyrics for that song.")
+
+async def search_song(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.message.text
+    # This is a placeholder for your song player logic
+    await update.message.reply_text(f"🎧 Searching for the song: '{query}'\n\n(Downloader logic goes here...)")
+
+# --- WEB SERVER & WEBHOOK SETUP ---
+async def main():
+    # 1. Initialize the Telegram Bot
+    application = Application.builder().token(BOT_TOKEN).build()
+
+    # 2. Add command handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("lyrics", get_lyrics))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_song))
+
+    # 3. Create a web server (aiohttp) to keep Render happy
+    app = web.Application()
+
+    # Health check endpoint for Render
+    app.router.add_get("/", lambda r: web.Response(text="Bot is alive and running!"))
+
+    # Webhook endpoint to receive messages from Telegram
+    async def telegram_webhook(request):
+        data = await request.json()
+        update = Update.de_json(data, application.bot)
+        await application.update_queue.put(update)
+        return web.Response(text="OK")
+
+    app.router.add_post(f"/{BOT_TOKEN}", telegram_webhook)
+
+    # 4. Set the Telegram Webhook
+    webhook_path = f"{WEBHOOK_URL}/{BOT_TOKEN}"
+    await application.bot.set_webhook(url=webhook_path)
+    logger.info(f"Webhook set to {webhook_path}")
+
+    # 5. Start the web server
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    logger.info(f"Web server running on port {PORT}")
+
+    # 6. Start the bot application
+    await application.initialize()
+    await application.start()
+    
+    # Keep the program running forever
+    await asyncio.Event().wait()
+
+if __name__ == "__main__":
+    # We use asyncio.run() properly here to prevent the event loop errors
+    asyncio.run(main())
