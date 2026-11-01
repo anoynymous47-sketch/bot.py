@@ -7,11 +7,11 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # --- CONFIGURATION ---
-# Using the test token from your screenshot
+# I have put your test token here. 
 BOT_TOKEN = "8966040622:AAEFlHB3i84oSxQaeXBoB6bpTJTQCfbGDPQ" 
 PORT = int(os.environ.get("PORT", 8080))
-# Render will provide this URL. You will set this in the Render dashboard.
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://your-app-name.onrender.com")
+# Render will provide this URL. You MUST set this in the Render dashboard.
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 
 # Enable logging
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -34,14 +34,11 @@ async def get_lyrics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🔎 Searching lyrics for: {text}...")
     
     try:
-        # Split by "-" to separate artist and title if provided
         if " - " in text:
             artist, title = text.split(" - ", 1)
         else:
-            # If no hyphen, just search by title
             artist, title = "", text
 
-        # Fetch lyrics from a free API (using asyncio.to_thread to prevent blocking)
         def fetch_lyrics():
             url = f"https://api.lyrics.ovh/v1/{artist}/{title}" if artist else f"https://api.lyrics.ovh/v1/Unknown/{title}"
             response = requests.get(url)
@@ -51,7 +48,6 @@ async def get_lyrics(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         lyrics = await asyncio.to_thread(fetch_lyrics)
         
-        # Telegram has a 4096 character limit, so we truncate if needed
         if len(lyrics) > 4000:
             lyrics = lyrics[:4000] + "\n\n... (truncated)"
             
@@ -62,23 +58,26 @@ async def get_lyrics(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def search_song(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.message.text
-    # This is a placeholder for your song player logic
     await update.message.reply_text(f"🎧 Searching for the song: '{query}'\n\n(Downloader logic goes here...)")
 
 # --- WEB SERVER & WEBHOOK SETUP ---
 async def main():
-    # 1. Initialize the Telegram Bot
+    if not WEBHOOK_URL:
+        logger.error("WEBHOOK_URL environment variable is not set. Exiting.")
+        return
+
+    # 1. Initialize the Telegram Bot Application
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # 2. Add command handlers
+    # 2. Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("lyrics", get_lyrics))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_song))
 
-    # 3. Create a web server (aiohttp) to keep Render happy
+    # 3. Create a web server (aiohttp) for Render
     app = web.Application()
 
-    # Health check endpoint for Render
+    # Health check endpoint
     app.router.add_get("/", lambda r: web.Response(text="Bot is alive and running!"))
 
     # Webhook endpoint to receive messages from Telegram
@@ -110,5 +109,4 @@ async def main():
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    # We use asyncio.run() properly here to prevent the event loop errors
     asyncio.run(main())
